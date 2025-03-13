@@ -1,0 +1,267 @@
+# Doom-Style Ray Casting Game: Technical Documentation
+
+## 1. Overview
+
+This document provides a detailed technical breakdown of a DOOM-style ray casting game implemented in C++. The game uses Windows API for window management and rendering, implementing a classic ray casting algorithm similar to games like Wolfenstein 3D and the original DOOM.
+
+## 2. Core Components
+
+### 2.1 Vector Mathematics (Vec2)
+
+The foundation of the 3D rendering is the `Vec2` class, which implements 2D vector mathematics:
+
+```cpp
+struct Vec2 {
+    float x, y;
+    Vec2() : x(0), y(0) {}
+    Vec2(float x, float y) : x(x), y(y) {}
+    
+    Vec2 operator+(const Vec2& v) const { return Vec2(x + v.x, y + v.y); }
+    Vec2 operator-(const Vec2& v) const { return Vec2(x - v.x, y - v.y); }
+    Vec2 operator*(float s) const { return Vec2(x * s, y * y); }  // Note: There's a bug here, should be y*s
+    float length() const { return sqrt(x * x + y * y); }
+    Vec2 normalize() const { 
+        float len = length(); 
+        return len > 0.0001f ? Vec2(x / len, y / len) : Vec2(0, 0); 
+    }
+};
+```
+
+Vector operations are critical for player movement, direction calculations, and the ray casting algorithm.
+
+### 2.2 Trigonometric Look-up Tables
+
+For performance optimization, the game uses pre-computed look-up tables for sine and cosine functions:
+
+```cpp
+const int ANGLE_TABLE_SIZE = 1024;
+float sinTable[ANGLE_TABLE_SIZE];
+float cosTable[ANGLE_TABLE_SIZE];
+
+// Initialized with:
+void initTrigTables() {
+    for (int i = 0; i < ANGLE_TABLE_SIZE; i++) {
+        float angle = 2.0f * M_PI * i / ANGLE_TABLE_SIZE;
+        sinTable[i] = sin(angle);
+        cosTable[i] = cos(angle);
+    }
+}
+```
+
+These tables significantly speed up trigonometric calculations compared to calling `sin()` and `cos()` directly, which are computationally expensive.
+
+## 3. Ray Casting Mathematics
+
+### 3.1 Camera and Ray Setup
+
+The player's view is defined by:
+- `position`: The player's 2D position in the world (x,y)
+- `direction`: A normalized vector pointing in the direction the player is facing
+- `plane`: A vector perpendicular to direction, representing the camera plane
+
+For each column of the screen, the ray direction is calculated:
+
+```cpp
+float cameraX = 2.0f * x / RAY_WIDTH - 1.0f; // X-coordinate in camera space
+Vec2 rayDir = Vec2(
+    player.direction.x + player.plane.x * cameraX,
+    player.direction.y + player.plane.y * cameraX
+);
+```
+
+This formula transforms the screen x-coordinate into camera space, where -1 is the left edge, 0 is center, and 1 is the right edge.
+
+### 3.2 Digital Differential Analysis (DDA)
+
+The core of the ray casting algorithm is DDA, an efficient grid traversal algorithm:
+
+```cpp
+// DDA algorithm
+int hit = 0;  // Wall hit?
+int side;     // NS or EW wall hit?
+
+while (hit == 0) {
+    // Jump to next map square
+    if (sideDistX < sideDistY) {
+        sideDistX += deltaDistX;
+        mapX += stepX;
+        side = 0;
+    } else {
+        sideDistY += deltaDistY;
+        mapY += stepY;
+        side = 1;
+    }
+    
+    // Check if ray hit a wall
+    if (mapX >= 0 && mapY >= 0 && mapX < MAP_WIDTH && mapY < MAP_HEIGHT && worldMap[mapX][mapY] > 0) {
+        hit = 1;
+    }
+}
+```
+
+This algorithm incrementally steps through the grid in X or Y direction (whichever requires the smaller step) until a wall is hit.
+
+### 3.3 Wall Height Calculation
+
+The distance to the wall (perpendicular to the camera plane) is used to calculate the height of the wall:
+
+```cpp
+float perpWallDist;
+if (side == 0) {
+    perpWallDist = sideDistX - deltaDistX;
+} else {
+    perpWallDist = sideDistY - deltaDistY;
+}
+
+// Add minimum distance check to prevent wall wiggling
+perpWallDist = max(perpWallDist, 0.05f);
+
+// Calculate height of wall slice to draw
+int lineHeight = int(SCREEN_HEIGHT / perpWallDist);
+```
+
+The mathematical principle here is perspective projection: objects farther away appear smaller, so we divide the screen height by the distance.
+
+## 4. Rendering Techniques
+
+### 4.1 Double Buffering
+
+To prevent screen tearing, the game uses double buffering:
+
+```cpp
+// Create back buffer for double buffering
+memDC = CreateCompatibleDC(hdc);
+backBuffer = CreateCompatibleBitmap(hdc, SCREEN_WIDTH, SCREEN_HEIGHT);
+```
+
+The rendering happens on an off-screen buffer and then is copied to the screen in a single operation.
+
+### 4.2 Texture Mapping
+
+Wall textures are mapped based on where the ray hit the wall:
+
+```cpp
+float wallX;
+if (side == 0) {
+    wallX = player.position.y + perpWallDist * rayDir.y;
+} else {
+    wallX = player.position.x + perpWallDist * rayDir.x;
+}
+wallX -= floor(wallX);
+
+// X coordinate in the texture
+int texX = int(wallX * CELL_SIZE);
+```
+
+This calculates the exact position on the wall where the ray hit, which is then mapped to a texture coordinate.
+
+### 4.3 Z-Buffer for Sprite Rendering
+
+The z-buffer stores the distance to each visible wall pixel, allowing sprites to be drawn correctly:
+
+```cpp
+// Store depth information for sprite rendering
+zBuffer[screenX] = perpWallDist;
+```
+
+When rendering sprites, they're only drawn if they're closer than the wall at that screen position.
+
+## 5. Performance Optimizations
+
+1. **Reduced Ray Count**: Instead of casting a ray for each screen column, the game uses:
+   ```cpp
+   const int RAY_WIDTH = SCREEN_WIDTH / 4;
+   ```
+   and scales each ray's result across multiple screen columns.
+
+2. **Sprite Rendering Optimization**:
+   ```cpp
+   if (dist > 400.0f || enemies[i].isDead) continue; // Skip distant enemies
+   ```
+   Distant or dead enemies aren't processed.
+
+3. **Adaptive Sprite Detail**:
+   ```cpp
+   int step = 1;
+   if (spriteHeight > SCREEN_HEIGHT / 2) step = 2; // Use larger steps for large sprites
+   ```
+   Larger sprites use larger stepping to reduce pixel operations.
+
+## 6. Input Handling and Game Logic
+
+The game responds to mouse and keyboard input:
+
+```cpp
+void update() {
+    if (gameOver) return;
+    
+    // Handle keyboard input for movement
+    if (GetAsyncKeyState('W') & 0x8000) {
+        movePlayer(1.0f, 0.0f);
+    }
+    // ... other movement keys
+    
+    // Handle mouse for rotation
+    if (mouseCaptured) {
+        // ... mouse handling code
+    }
+}
+```
+
+The `GetAsyncKeyState` Win32 API function checks if a key is currently pressed. The `0x8000` bitmask checks the most significant bit, which indicates if the key is currently down.
+
+## 7. Windows-Specific Details
+
+The game uses the Windows API for window creation and management:
+
+1. `RegisterClass` and `CreateWindowEx` create the main window
+2. `BitBlt` and `SetDIBitsToDevice` handle graphics operations
+3. `WM_PAINT`, `WM_KEYDOWN`, and other Windows messages are processed in the `WindowProc` function
+
+The Win32 message pump and event handling system is used to process window events and maintain the application's responsiveness.
+
+## 8. Memory Management
+
+C++-specific memory management techniques used in the game:
+
+1. RAII (Resource Acquisition Is Initialization) principle through constructor/destructor pairs:
+   ```cpp
+   Game() {
+       // Acquire resources (allocate memory)
+       renderBuffer = new unsigned int[SCREEN_WIDTH * SCREEN_HEIGHT];
+       // ...
+   }
+   
+   ~Game() {
+       // Release resources
+       if (renderBuffer) delete[] renderBuffer;
+       // ...
+   }
+   ```
+
+2. GDI resource management:
+   ```cpp
+   if (backBuffer) DeleteObject(backBuffer);
+   if (memDC) DeleteDC(memDC);
+   ```
+
+## 9. Common Issues and Solutions
+
+1. A/D key inversion was fixed by adjusting the strafe direction calculation:
+   ```cpp
+   // Fix the A/D controls by reversing the sign on strafe
+   newPos.x += player.direction.y * strafe * player.moveSpeed;
+   newPos.y += -player.direction.x * strafe * player.moveSpeed;
+   ```
+
+2. Wall wiggling when close was addressed by implementing a minimum wall distance:
+   ```cpp
+   // Add minimum distance check to prevent wall wiggling
+   perpWallDist = max(perpWallDist, 0.05f);
+   ```
+
+## Conclusion
+
+This implementation demonstrates key techniques from classic 3D game development, particularly the ray casting approach used in early first-person shooters. The code balances performance and visual quality using various optimization techniques while providing a complete game system with enemies, weapons, and player movement.
+
+Similar code found with 2 license types
